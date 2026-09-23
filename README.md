@@ -1,120 +1,146 @@
 # slack-commander-opencode-session
 
-`slack-commander` から OpenCode のセッションを継続して利用するための wrapper です。
+`slack-commander` から OpenCode を利用するための小さなコマンドです。
 
-Slack のスレッドと OpenCode のセッションを対応付け、同じスレッドへの後続投稿では既存のセッションを自動的に再利用します。
+Slack のスレッドごとに OpenCode のセッションを対応付け、同じスレッドから続けて呼び出したときは以前のセッションを再利用します。
 
-対応付けには OpenCode 自身のセッション情報を利用するため、この wrapper はセッション ID などの永続状態を持ちません。
+OpenCode は `opencode serve` で常駐させ、このコマンドから HTTP API を呼び出します。OpenCode CLI を毎回起動する方式ではありません。
 
 ## 仕組み
 
-1. 環境変数 `SLACK_CHANNEL_ID` と `SLACK_THREAD_TS` から、次の形式で OpenCode のセッションタイトルを生成します。
-
-   ```text
-   slack:<SLACK_CHANNEL_ID>:<SLACK_THREAD_TS>
-   ```
-
-   例:
-
-   ```text
-   slack:C01234567:1780000123.456789
-   ```
-
-2. OpenCode コンテナで `opencode session list --format json` を実行し、タイトルが完全一致するセッションを探します。
-
-   * 0件: `opencode run --title <title> ...` で新しいセッションを作成
-   * 1件: `opencode run --session <session-id> ...` で既存のセッションを継続
-   * 2件以上: エラー終了
-
-   検索対象は `opencode session list` が返す範囲です。古いセッションが一覧に含まれない場合は、新しいセッションとして扱います。
-
-3. `opencode run` の標準入力・標準出力・標準エラー出力を wrapper に接続し、OpenCode の終了コードを可能な限りそのまま返します。
-
-`session list` に失敗した場合は、新しいセッションを作成せずエラー終了します。既存セッションを確認できないまま新しいセッションを作ると、同じ Slack スレッドに対応するセッションが重複する可能性があるためです。
-
-新しいセッションの最初の `run` が途中で失敗した場合も、そのセッションを wrapper 側で削除したり修復したりはしません。
-
-## CLI
+Slack のチャンネル ID とスレッドのタイムスタンプから、次の形式のセッションタイトルを作ります。
 
 ```text
-opencode-session [--service SERVICE] run [OPENCODE RUN ARGS...]
+slack:<SLACK_CHANNEL_ID>:<SLACK_THREAD_TS>
 ```
 
-`--service` には OpenCode を実行する Compose service 名を指定します。デフォルトは `opencode` です。
-
-`run` より後ろの引数は、原則としてそのまま `opencode run` に渡します。
-
-ただし、セッションの選択に使う次のオプションは wrapper が管理するため指定できません。
+例えば、
 
 ```text
---session
--s
---title
+SLACK_CHANNEL_ID=C01234567
+SLACK_THREAD_TS=1780000123.456789
 ```
 
-## 必要な環境変数
+なら、セッションタイトルは次のようになります。
 
-| 変数                 | 説明                                        |
-| ------------------ | ----------------------------------------- |
-| `SLACK_CHANNEL_ID` | Slack のチャンネル ID。未設定または空の場合はエラー            |
-| `SLACK_THREAD_TS`  | Slack のスレッドを識別するタイムスタンプ。未設定または空の場合はエラー |
+```text
+slack:C01234567:1780000123.456789
+```
 
-## 実行条件
+実行時は、まずこのタイトルに対応する OpenCode のセッションを検索します。
 
-OpenCode は wrapper と同じコンテナ内では実行しません。
+```text
+GET /session?search=<title>
+```
 
-[compose-exec](https://github.com/hnw/compose-exec) を Go ライブラリとして利用し、Compose service として定義された OpenCode コンテナを sibling container として起動します。`docker compose` CLI や外部の `compose-exec` コマンドは呼び出しません。
+検索結果はタイトルの完全一致でも確認します。
 
-この構成では、次の条件を満たす必要があります。
+* 一致するセッションがない場合は、新しいセッションを作成する
+* 1件だけ見つかった場合は、そのセッションを再利用する
+* 2件以上見つかった場合は、どれを使うか判断せずエラー終了する
 
-* wrapper を実行するコンテナから Docker socket にアクセスできること
-* wrapper を実行する service と OpenCode の service が同じ Compose project に定義されていること
-* wrapper の current working directory から Compose project を読み込めること
+新しいセッションを作成した場合も、既存のセッションを見つけた場合も、そのセッションへ次の API で入力を送ります。
 
-Compose project の読み込みでは、`compose.yaml` や `docker-compose.yml` など、通常の Compose 設定ファイルを使用します。
+```text
+POST /session/<session-id>/message
+```
 
-Docker-outside-of-Docker 構成では、Compose project のディレクトリが host と wrapper コンテナの両方で同じ絶対パスになるように mount してください。Compose の bind mount の source は host 側のパスとして解決されるためです。
+OpenCode から返されたレスポンスのうち、`text` part だけを標準出力へ出力します。reasoning や tool call は出力しません。
+
+このコマンド自身は、Slack スレッドと OpenCode セッションの対応表を保存しません。OpenCode に保存されたセッションタイトルだけを使って、対応するセッションを探します。
 
 ## 使い方
 
-`slack-commander` の設定例:
-
-```toml
-[[commands]]
-keyword = "opencode *"
-command = "opencode-session run *"
-runner = "compose"
-tty = true
-timeout = 3600
-reply_broadcast = false
+```bash
+opencode-session run "今日のtodoを教えて"
 ```
 
-Compose project には、wrapper を実行する service と OpenCode を実行する service を定義します。
+`run` より後ろに複数の引数を指定した場合は、スペースでつないで1つの入力として送信します。
 
-```yaml
-services:
-  slack-commander:
-    image: your/slack-commander:latest
-    working_dir: /project
-    volumes:
-      - .:/project
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - SLACK_CHANNEL_ID
-      - SLACK_THREAD_TS
+例えば、
 
-  opencode:
-    image: ghcr.io/sst/opencode:latest
-    # OpenCode の永続データ、認証情報、設定などは
-    # この service 側で管理する
-    # 例: config や cache の volume mount
+```bash
+opencode-session run 今日の todo を教えて
 ```
 
-OpenCode の認証情報、設定、セッションデータなどは wrapper では管理せず、`opencode` service 側で管理します。
+は、次の入力として扱われます。
+
+```text
+今日の todo を教えて
+```
+
+OpenCode CLI のオプションをそのまま渡す機能はありません。
+
+## 環境変数
+
+`SLACK_CHANNEL_ID` と `SLACK_THREAD_TS` は必須です。
+
+| 変数                 | 説明                                                  |
+| ------------------ | --------------------------------------------------- |
+| `SLACK_CHANNEL_ID` | Slack のチャンネル ID                                     |
+| `SLACK_THREAD_TS`  | Slack のスレッドを識別するタイムスタンプ                             |
+| `OPENCODE_URL`     | `opencode serve` の URL。未設定時は `http://opencode:4096` |
+
+OpenCode へのリクエストでは、作業ディレクトリとして `/workspace` を指定します。
+
+実際には、次の HTTP ヘッダーが付加されます。
+
+```text
+x-opencode-directory: %2Fworkspace
+```
+
+## OpenCode 側の準備
+
+あらかじめ `opencode serve` を常駐させておく必要があります。
+
+OpenCode の認証情報や MCP サーバなどの設定は、`opencode serve` を実行する側で行ってください。このコマンドは、それらの設定や状態を管理しません。
+
+例えば Docker Compose で利用する場合は、`opencode` を通常の常駐サービスとして起動し、このコマンドから
+
+```text
+http://opencode:4096
+```
+
+へ接続できるようにします。
+
+## 同時実行について
+
+同じ Slack スレッドに対する実行は、呼び出し側で直列化する必要があります。
+
+このコマンド自身は排他制御を行いません。
+
+同じスレッドに対して初回の呼び出しが同時に実行されると、どちらも「対応するセッションがない」と判断し、同じタイトルのセッションを複数作成する可能性があります。
+
+`slack-commander` から利用する場合は、同じスレッドの処理が同時に実行されないようにしてください。
+
+## エラー時の動作
+
+次のような場合はエラー終了します。
+
+* `SLACK_CHANNEL_ID` または `SLACK_THREAD_TS` が設定されていない
+* `opencode serve` に接続できない
+* OpenCode API がエラーを返した
+* OpenCode API のレスポンスを正しく読み取れない
+* 同じタイトルのセッションが複数存在する
+* 一致したセッションに ID がない
+* OpenCode の回答に `text` part が含まれていない
+
+セッションの検索に失敗した場合、それを「セッションが存在しない」とみなして新規作成することはありません。
 
 ## 開発
 
 ```bash
 go test ./...
+go vet ./...
 golangci-lint run
 ```
+
+テストでは `httptest.Server` を使って OpenCode API の動作を再現するため、実際の `opencode serve` は必要ありません。
+
+## コンテナイメージ
+
+コンテナイメージは `ko` でビルドします。
+
+`v*` のタグを push すると GitHub Actions が `linux/amd64` と `linux/arm64` のイメージをビルドし、GHCR に公開します。
+
+詳細は `.ko.yaml` と `.github/workflows/ci.yml` を参照してください。

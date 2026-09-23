@@ -11,3 +11,11 @@ linters:
     - unconvert
     - unparam
     - unused
+
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprintln
+        - fmt.Fprintf
+        - (net/http.ResponseWriter).Write
+        - (*net/http.HttpServletResponse).Write

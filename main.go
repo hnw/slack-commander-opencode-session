@@ -2,120 +2,68 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"io"
 	"os"
-
-	"github.com/hnw/compose-exec/compose"
-	"github.com/hnw/slack-commander-opencode-session/session"
+	"strings"
 )
 
-const usage = `opencode-session - run OpenCode in a Compose service with Slack-thread-bound sessions
+const usage = `opencode-session - HTTP client for a resident ` + "`opencode serve`" + `
 
 Usage:
-  opencode-session [--service SERVICE] run [OPENCODE RUN ARGS...]
+  opencode-session run PROMPT...
 
 Environment:
   SLACK_CHANNEL_ID   Slack channel ID (required)
   SLACK_THREAD_TS    Slack thread timestamp (required)
+  OPENCODE_URL       URL of the resident opencode serve (default: %s)
 `
 
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "opencode-session: "+format+"\n", args...)
-	os.Exit(1)
-}
-
 func main() {
-	os.Exit(run())
+	os.Exit(run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
 }
 
-func run() int {
-	service := session.DefaultService
-	args := os.Args[1:]
-	if len(args) > 0 && args[0] == "--service" {
-		if len(args) < 2 {
-			fmt.Fprint(os.Stderr, usage)
-			fatalf("--service requires a value")
-		}
-		service = args[1]
-		args = args[2:]
-	}
+func run(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "run" {
-		fmt.Fprint(os.Stderr, usage)
+		_, _ = fmt.Fprintf(stderr, usage, DefaultOpencodeURL)
 		return 2
 	}
-	userArgs := args[1:]
-
-	if err := session.ValidateRunArgs(userArgs); err != nil {
-		fatalf("%v", err)
+	prompt := strings.Join(args[1:], " ")
+	if strings.TrimSpace(prompt) == "" {
+		_, _ = fmt.Fprintln(stderr, "opencode-session: prompt is empty")
+		return 2
 	}
 
-	title, err := session.TitleFromOSEnv()
+	title, err := TitleFromEnv(getenv)
 	if err != nil {
-		fatalf("%v", err)
+		_, _ = fmt.Fprintf(stderr, "opencode-session: %v\n", err)
+		return 1
+	}
+	baseURL := strings.TrimSpace(getenv("OPENCODE_URL"))
+	if baseURL == "" {
+		baseURL = DefaultOpencodeURL
 	}
 
-	if err := execute(os.Args[0], service, title, userArgs); err != nil {
-		var exitErr *compose.ExitError
-		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode()
-		}
-		fatalf("%v", err)
-	}
-	return 0
-}
-
-func execute(name, service, title string, userArgs []string) error {
+	client := NewOpenCodeClient(baseURL)
 	ctx := context.Background()
 
-	// The compose project is loaded once and its service is reused for both
-	// session lookup and `opencode run`.
-	project, err := compose.LoadProject(ctx, ".")
+	sessionID, err := resolveSession(ctx, client, title)
 	if err != nil {
-		return fmt.Errorf("load compose project: %w", err)
+		_, _ = fmt.Fprintf(stderr, "opencode-session: %v\n", err)
+		return 1
 	}
-	svc, err := project.Service(service)
+
+	msg, err := client.SendMessage(ctx, sessionID, prompt)
 	if err != nil {
-		return fmt.Errorf("opencode service: %w", err)
+		_, _ = fmt.Fprintf(stderr, "opencode-session: %v\n", err)
+		return 1
 	}
 
-	lookup, err := lookupSession(ctx, svc, title)
-	if err != nil {
-		return err
+	texts := msg.TextParts()
+	if len(texts) == 0 {
+		_, _ = fmt.Fprintf(stderr, "opencode-session: no text part in the response message (session=%s)\n", sessionID)
+		return 1
 	}
-
-	return runOpenCode(name, svc, title, lookup, userArgs)
-}
-
-func lookupSession(ctx context.Context, svc *compose.Service, title string) (session.Lookup, error) {
-	cmd := svc.CommandContext(ctx, "session", "list", "--format", "json")
-	out, err := cmd.Output()
-	if err != nil {
-		return session.Lookup{}, fmt.Errorf("session list: %w", err)
-	}
-	return session.LookupSessions(out, title)
-}
-
-func runOpenCode(
-	name string,
-	svc *compose.Service,
-	title string,
-	lookup session.Lookup,
-	userArgs []string,
-) error {
-	args := session.RunArgs(title, lookup.SessionID, userArgs)
-	cmd := svc.CommandContext(context.Background(), args...)
-	cmd.TTY = isTTY()
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		var exitErr *compose.ExitError
-		if errors.As(err, &exitErr) {
-			return exitErr
-		}
-		return fmt.Errorf("%s %s: %w", name, cmd.String(), err)
-	}
-	return nil
+	_, _ = fmt.Fprintln(stdout, strings.Join(texts, "\n"))
+	return 0
 }
