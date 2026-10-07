@@ -79,6 +79,12 @@ func (r *Runner) Run(ctx context.Context, title, prompt string) (string, error) 
 	if err != nil {
 		return "", err
 	}
+	// A run OpenCode ended with an error has no text to return, and the failure
+	// it recorded is the only explanation there is: reporting a missing text
+	// instead would hide it behind a symptom.
+	if err := answer.Failure(); err != nil {
+		return "", err
+	}
 	texts := answer.TextParts()
 	if len(texts) == 0 {
 		return "", fmt.Errorf("no text content in the new assistant message (session=%s, message=%s)", sessionID, answer.ID)

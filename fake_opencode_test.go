@@ -78,8 +78,38 @@ func (f *fakeOpencode) addAnswer(id string, content ...AssistantContent) *fakeOp
 func (f *fakeOpencode) answerAfterPrompt(content ...AssistantContent) *fakeOpencode {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.promptAnswer = &AssistantMessage{ID: "msg_new", Type: "assistant", Content: content}
+	f.promptAnswer = &AssistantMessage{
+		ID:      "msg_new",
+		Type:    "assistant",
+		Content: content,
+		Finish:  FinishStop,
+	}
 	return f
+}
+
+// failAfterPrompt is the assistant message a rejected prompt produces: OpenCode
+// accepts the prompt and then ends the run with an error and no content at all.
+func (f *fakeOpencode) failAfterPrompt(finish string, detail *AssistantError) *fakeOpencode {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.promptAnswer = &AssistantMessage{
+		ID:      "msg_new",
+		Type:    "assistant",
+		Content: []AssistantContent{},
+		Finish:  finish,
+		Error:   detail,
+	}
+	return f
+}
+
+// providerRejection is the detail OpenCode records when the provider refuses to
+// serve a run, reproduced from a real provider.auth response.
+func providerRejection() *AssistantError {
+	return &AssistantError{
+		Type:    "provider.auth",
+		Message: "Error from provider (Console): OpenCode's free tier can only be used from within OpenCode",
+		Status:  403,
+	}
 }
 
 // runPlan makes the active endpoint report the given sequence of running states,
