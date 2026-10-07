@@ -2,107 +2,186 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-func TestRunUsage(t *testing.T) {
-	t.Parallel()
-	var stdout, stderr bytes.Buffer
-	code := run([]string{}, func(string) string { return "" }, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("code = %d, want 2", code)
-	}
+// runCLI calls the command line entry point with the given environment.
+func runCLI(t *testing.T, args []string, env map[string]string) (code int, stdout, stderr string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	code = run(args, func(key string) string { return env[key] }, &out, &errOut)
+	return code, out.String(), errOut.String()
 }
 
-func TestRunEmptyPrompt(t *testing.T) {
-	t.Parallel()
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"run", "  "}, func(string) string { return "" }, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("code = %d, want 2", code)
-	}
-}
-
-func TestRunMissingEnv(t *testing.T) {
+func TestRunUsageErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		env  map[string]string
+		args []string
 	}{
-		{"missing channel", map[string]string{"SLACK_THREAD_TS": "1.2"}},
-		{"missing thread", map[string]string{"SLACK_CHANNEL_ID": "C1"}},
+		{"no arguments", nil},
+		{"unknown command", []string{"send", "hi"}},
+		{"no prompt", []string{"run"}},
+		{"blank prompt", []string{"run", "   "}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var stdout, stderr bytes.Buffer
-			code := run([]string{"run", "prompt"}, func(key string) string { return tt.env[key] }, &stdout, &stderr)
-			if code != 1 {
-				t.Errorf("code = %d, want 1", code)
+			code, stdout, stderr := runCLI(t, tt.args, map[string]string{})
+			if code != 2 {
+				t.Errorf("code = %d, want 2", code)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if stderr == "" {
+				t.Error("stderr is empty, want an explanation")
 			}
 		})
 	}
 }
 
-func TestRunHTTPError(t *testing.T) {
+func TestRunMissingSlackEnv(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("null")) // session list returns null -> error
-	}))
-	defer srv.Close()
-
-	env := map[string]string{
-		"SLACK_CHANNEL_ID": "C1",
-		"SLACK_THREAD_TS":  "1.2",
-		"OPENCODE_URL":     srv.URL,
+	tests := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"missing channel", map[string]string{EnvThreadTS: "1780000123.456789"}},
+		{"missing thread", map[string]string{EnvChannelID: "C01234567"}},
 	}
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"run", "hi"}, func(key string) string { return env[key] }, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
-	}
-	if stdout.Len() != 0 {
-		t.Errorf("stdout = %q, want empty", stdout.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			code, stdout, stderr := runCLI(t, []string{"run", "hi"}, tt.env)
+			if code != 1 {
+				t.Errorf("code = %d, want 1", code)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if !strings.Contains(stderr, "opencode-session:") {
+				t.Errorf("stderr = %q, want a prefixed error", stderr)
+			}
+		})
 	}
 }
 
-func TestRunSuccess(t *testing.T) {
+func TestRunJoinsPromptArguments(t *testing.T) {
 	t.Parallel()
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /session", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/session" {
-			t.Errorf("path = %s, want /session", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]session{})
-	})
-	mux.HandleFunc("POST /session", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(session{ID: "new1", Title: "slack:C1:1.2"})
-	})
-	mux.HandleFunc("POST /session/new1/message", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(message{Parts: []textPart{{Type: "text", Text: "answer"}}})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	fake := newFakeOpencode().
+		addSession("ses_1", "slack:C1:1.2").
+		answerAfterPrompt(AssistantContent{Type: "text", Text: "ok"})
+	srv := fake.start(t)
 
-	env := map[string]string{
-		"SLACK_CHANNEL_ID": "C1",
-		"SLACK_THREAD_TS":  "1.2",
-		"OPENCODE_URL":     srv.URL + "/",
-	}
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"run", "hi"}, func(key string) string { return env[key] }, &stdout, &stderr)
+	code, stdout, stderr := runCLI(t, []string{"run", "今日の", "todo", "を教えて"}, map[string]string{
+		EnvChannelID:   "C1",
+		EnvThreadTS:    "1.2",
+		EnvOpenCodeURL: srv.URL,
+	})
 	if code != 0 {
-		t.Errorf("code = %d, stderr: %s", code, stderr.String())
+		t.Fatalf("code = %d, stderr = %s", code, stderr)
 	}
-	if got := strings.TrimSpace(stdout.String()); got != "answer" {
-		t.Errorf("stdout = %q, want answer", got)
+	if log := fake.promptLog(); len(log) != 1 || log[0].Text != "今日の todo を教えて" {
+		t.Errorf("prompt log = %+v, want the joined prompt", log)
+	}
+	if got := strings.TrimSpace(stdout); got != "ok" {
+		t.Errorf("stdout = %q, want ok", got)
+	}
+}
+
+func TestRunCreatesSessionAndPrintsOnlyText(t *testing.T) {
+	t.Parallel()
+	fake := newFakeOpencode().
+		answerAfterPrompt(
+			AssistantContent{Type: "reasoning", Text: "hidden reasoning"},
+			AssistantContent{Type: "tool", Text: "hidden tool"},
+			AssistantContent{Type: "text", Text: "visible answer"},
+		)
+	srv := fake.start(t)
+
+	code, stdout, stderr := runCLI(t, []string{"run", "hi"}, map[string]string{
+		EnvChannelID:   "C1",
+		EnvThreadTS:    "1.2",
+		EnvOpenCodeURL: srv.URL + "/",
+	})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr)
+	}
+	if got := strings.TrimSpace(stdout); got != "visible answer" {
+		t.Errorf("stdout = %q, want only the text content", got)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty", stderr)
+	}
+	if got := fake.titles(); len(got) != 1 || got[0] != "slack:C1:1.2" {
+		t.Errorf("titles = %v, want the Slack thread title", got)
+	}
+}
+
+func TestRunKeepsStdoutEmptyOnFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		arrange func(*fakeOpencode)
+		wantErr string
+	}{
+		{
+			name: "duplicate sessions",
+			arrange: func(f *fakeOpencode) {
+				f.addSession("ses_a", "slack:C1:1.2").addSession("ses_b", "slack:C1:1.2")
+			},
+			wantErr: "multiple sessions",
+		},
+		{
+			name:    "malformed session list",
+			arrange: func(f *fakeOpencode) { f.fail(http.MethodGet, "/api/session", http.StatusOK, "not json") },
+			wantErr: "list sessions",
+		},
+		{
+			name:    "opencode error",
+			arrange: func(f *fakeOpencode) { f.fail(http.MethodGet, "/api/session", http.StatusInternalServerError, "boom") },
+			wantErr: "500",
+		},
+		{
+			name: "pending form",
+			arrange: func(f *fakeOpencode) {
+				f.addSession("ses_1", "slack:C1:1.2").addForm()
+			},
+			wantErr: "unsupported interaction",
+		},
+		{
+			name: "answer without text",
+			arrange: func(f *fakeOpencode) {
+				f.addSession("ses_1", "slack:C1:1.2").
+					answerAfterPrompt(AssistantContent{Type: "reasoning", Text: "hidden"})
+			},
+			wantErr: "no text content",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := newFakeOpencode()
+			tt.arrange(fake)
+			srv := fake.start(t)
+
+			code, stdout, stderr := runCLI(t, []string{"run", "hi"}, map[string]string{
+				EnvChannelID:   "C1",
+				EnvThreadTS:    "1.2",
+				EnvOpenCodeURL: srv.URL,
+			})
+			if code != 1 {
+				t.Errorf("code = %d, want 1", code)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if !strings.Contains(stderr, tt.wantErr) {
+				t.Errorf("stderr = %q, want it to mention %q", stderr, tt.wantErr)
+			}
+		})
 	}
 }
