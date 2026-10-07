@@ -1,3 +1,6 @@
+// Package main implements opencode-session, a stateless command that keeps one
+// `opencode serve` session per Slack thread: it resolves the session of the
+// thread, sends the prompt, and prints the answer once the agent finished.
 package main
 
 import (

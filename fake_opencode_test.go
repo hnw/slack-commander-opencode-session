@@ -164,56 +164,84 @@ func (f *fakeOpencode) titles() []string {
 	return titles
 }
 
+// start serves the fake endpoints until the test ends.
 func (f *fakeOpencode) start(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
+	f.handleSessionList(t, mux)
+	f.handleSessionCreate(t, mux)
+	f.handlePrompt(t, mux)
+	f.handleActive(t, mux)
+	f.handleMessages(t, mux)
+	f.handleForms(t, mux)
+	f.handleFormDetail(t, mux)
 
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// handleSessionList serves the session search: the real server filters titles
+// fuzzily and hands out an opaque cursor for the next page.
+func (f *fakeOpencode) handleSessionList(t *testing.T, mux *http.ServeMux) {
+	t.Helper()
 	mux.HandleFunc("GET /api/session", func(w http.ResponseWriter, r *http.Request) {
+		cursor := r.URL.Query().Get("cursor")
+		offset, err := decodeCursor(cursor)
+		if err != nil {
+			t.Errorf("cursor is not the opaque token the fake issued: %q: %v", cursor, err)
+			http.Error(w, "bad cursor", http.StatusBadRequest)
+			return
+		}
 		f.mu.Lock()
 		f.directoriesSet = append(f.directoriesSet, r.URL.Query().Get("directory"))
-		search := r.URL.Query().Get("search")
-		// The real server searches titles fuzzily.
-		matches := []SessionInfo{}
-		for _, s := range f.sessions {
-			if search == "" || strings.Contains(s.Title, search) {
-				matches = append(matches, s)
-			}
-		}
-		// The cursor is opaque: it only says where to continue.
-		data := matches
-		var next any
-		offset := 0
-		if cursor := r.URL.Query().Get("cursor"); cursor != "" {
-			decoded, err := base64.StdEncoding.DecodeString(cursor)
-			if err != nil {
-				f.mu.Unlock()
-				t.Errorf("cursor is not the opaque token the fake issued: %q", cursor)
-				http.Error(w, "bad cursor", http.StatusBadRequest)
-				return
-			}
-			offset, err = strconv.Atoi(string(decoded))
-			if err != nil {
-				f.mu.Unlock()
-				http.Error(w, "bad cursor", http.StatusBadRequest)
-				return
-			}
-		}
-		if size := f.pageSizeValue; size > 0 {
-			end := offset + size
-			if end < len(matches) {
-				data = matches[offset:end]
-				next = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
-			} else {
-				data = matches[offset:]
-			}
-		}
+		data, next := f.sessionPage(matchingSessions(f.sessions, r.URL.Query().Get("search")), offset)
 		f.mu.Unlock()
 		f.respond(t, w, http.MethodGet, "/api/session", map[string]any{
 			"data":   data,
 			"cursor": map[string]any{"previous": nil, "next": next},
 		})
 	})
+}
 
+// sessionPage cuts one page out of the matches and returns the cursor to
+// continue from, if any page is left. The cursor is opaque: it only says where
+// to continue. It must be called with the fake lock held.
+func (f *fakeOpencode) sessionPage(matches []SessionInfo, offset int) ([]SessionInfo, any) {
+	size := f.pageSizeValue
+	if size <= 0 || offset+size >= len(matches) {
+		return matches[offset:], nil
+	}
+	end := offset + size
+	return matches[offset:end], base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
+}
+
+// matchingSessions keeps the sessions whose title matches the search term.
+func matchingSessions(sessions []SessionInfo, search string) []SessionInfo {
+	matches := []SessionInfo{}
+	for _, s := range sessions {
+		if search == "" || strings.Contains(s.Title, search) {
+			matches = append(matches, s)
+		}
+	}
+	return matches
+}
+
+// decodeCursor reads back the offset the fake encoded into a cursor.
+func decodeCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(string(decoded))
+}
+
+// handleSessionCreate serves the session creation.
+func (f *fakeOpencode) handleSessionCreate(t *testing.T, mux *http.ServeMux) {
+	t.Helper()
 	mux.HandleFunc("POST /api/session", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Title    string          `json:"title"`
@@ -232,7 +260,12 @@ func (f *fakeOpencode) start(t *testing.T) *httptest.Server {
 		f.mu.Unlock()
 		f.respond(t, w, http.MethodPost, "/api/session", map[string]any{"data": created})
 	})
+}
 
+// handlePrompt serves the prompt submission and appends the answer the prompt
+// produces to the prompted session.
+func (f *fakeOpencode) handlePrompt(t *testing.T, mux *http.ServeMux) {
+	t.Helper()
 	mux.HandleFunc("POST /api/session/{sessionID}/prompt", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Text string `json:"text"`
@@ -260,8 +293,13 @@ func (f *fakeOpencode) start(t *testing.T) *httptest.Server {
 			},
 		})
 	})
+}
 
-	mux.HandleFunc("GET /api/session/active", func(w http.ResponseWriter, r *http.Request) {
+// handleActive serves the sessions the server is currently running, following
+// the plan the test set up.
+func (f *fakeOpencode) handleActive(t *testing.T, mux *http.ServeMux) {
+	t.Helper()
+	mux.HandleFunc("GET /api/session/active", func(w http.ResponseWriter, _ *http.Request) {
 		f.mu.Lock()
 		f.activeGets++
 		running := f.activeRest
@@ -278,7 +316,11 @@ func (f *fakeOpencode) start(t *testing.T) *httptest.Server {
 		f.mu.Unlock()
 		f.respond(t, w, http.MethodGet, "/api/session/active", map[string]any{"data": data})
 	})
+}
 
+// handleMessages serves the newest assistant message of a session.
+func (f *fakeOpencode) handleMessages(t *testing.T, mux *http.ServeMux) {
+	t.Helper()
 	mux.HandleFunc("GET /api/session/{sessionID}/message", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		if query.Get("type") != "assistant" || query.Get("order") != "desc" || query.Get("limit") != "1" {
@@ -302,7 +344,11 @@ func (f *fakeOpencode) start(t *testing.T) *httptest.Server {
 			"cursor": map[string]any{"previous": nil, "next": nil},
 		})
 	})
+}
 
+// handleForms serves the forms still waiting for an answer.
+func (f *fakeOpencode) handleForms(t *testing.T, mux *http.ServeMux) {
+	t.Helper()
 	mux.HandleFunc("GET /api/session/{sessionID}/form", func(w http.ResponseWriter, r *http.Request) {
 		sessionID := r.PathValue("sessionID")
 		f.mu.Lock()
@@ -314,21 +360,19 @@ func (f *fakeOpencode) start(t *testing.T) *httptest.Server {
 		}
 		f.respond(t, w, http.MethodGet, "/api/session/"+sessionID+"/form", map[string]any{"data": data})
 	})
+}
 
-	// The per-form detail route is deliberately not served: detecting a pending
-	// form must not cost one request per form.
-
-	mux.HandleFunc("/api/session/{sessionID}/form/{formID}", func(w http.ResponseWriter, r *http.Request) {
+// handleFormDetail counts the per-form detail lookups. The route is deliberately
+// not implemented: detecting a pending form must not cost one request per form.
+func (f *fakeOpencode) handleFormDetail(t *testing.T, mux *http.ServeMux) {
+	t.Helper()
+	mux.HandleFunc("/api/session/{sessionID}/form/{formID}", func(w http.ResponseWriter, _ *http.Request) {
 		f.mu.Lock()
 		f.formDetailGets++
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotImplemented)
 	})
-
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv
 }
 
 // respond writes the endpoint response, or the configured failure.
