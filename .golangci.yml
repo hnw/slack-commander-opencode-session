@@ -1,21 +1,34 @@
 version: "2"
 
 run:
-  timeout: 3m
+  timeout: 5m
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
 
 linters:
-  default: standard
+  default: none
   enable:
-    - errorlint
-    - misspell
-    - unconvert
-    - unparam
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
     - unused
+    - revive
+    - gocyclo
+    - gosec
 
   settings:
-    errcheck:
-      exclude-functions:
-        - fmt.Fprintln
-        - fmt.Fprintf
-        - (net/http.ResponseWriter).Write
-        - (*net/http.HttpServletResponse).Write
+    govet:
+      enable:
+        - shadow
+    gocyclo:
+      min-complexity: 15
+
+  exclusions:
+    paths:
+      - vendor
+      - ".*\\.pb\\.go$"
+      - ".*\\.gen\\.go$"
