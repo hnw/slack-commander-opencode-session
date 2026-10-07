@@ -134,122 +134,130 @@ func TestMatchSessionByTitle(t *testing.T) {
 
 func TestResolveSession(t *testing.T) {
 	t.Parallel()
-	title := "slack:C1:1.2"
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"no session creates one", resolveCreatesWhenAbsent},
+		{"existing session is reused", resolveReusesExisting},
+		{"partial matches are ignored", resolveIgnoresPartials},
+		{"duplicate sessions are ambiguous", resolveRejectsDuplicates},
+		{"exact match on a later page is reused", resolveReusesPagedExact},
+		{"duplicate sessions across pages are ambiguous", resolveRejectsPagedDuplicates},
+		{"search failure does not create a session", resolveFailsWhenSearchFails},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tt.run(t)
+		})
+	}
+}
 
-	t.Run("no session creates one", func(t *testing.T) {
-		t.Parallel()
-		fake := newFakeOpencode()
-		srv := fake.start(t)
+// resolveOnFake starts the fake server and resolves the test title against it.
+func resolveOnFake(t *testing.T, fake *fakeOpencode) (string, error) {
+	t.Helper()
+	srv := fake.start(t)
+	client := NewOpenCodeClient(srv.URL, WorkspaceDirectory, BasicAuth{})
+	return ResolveSession(context.Background(), client, testTitle)
+}
 
-		id, err := ResolveSession(context.Background(), NewOpenCodeClient(srv.URL, WorkspaceDirectory, BasicAuth{}), title)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if id != "ses_new1" {
-			t.Errorf("id = %q, want a newly created session", id)
-		}
-		if got := fake.titles(); len(got) != 1 || got[0] != title {
-			t.Errorf("titles = %v, want [%s]", got, title)
-		}
-	})
+func resolveCreatesWhenAbsent(t *testing.T) {
+	fake := newFakeOpencode()
 
-	t.Run("existing session is reused", func(t *testing.T) {
-		t.Parallel()
-		fake := newFakeOpencode().addSession("ses_existing", title)
-		srv := fake.start(t)
+	id, err := resolveOnFake(t, fake)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "ses_new1" {
+		t.Errorf("id = %q, want a newly created session", id)
+	}
+	if got := fake.titles(); len(got) != 1 || got[0] != testTitle {
+		t.Errorf("titles = %v, want [%s]", got, testTitle)
+	}
+}
 
-		id, err := ResolveSession(context.Background(), NewOpenCodeClient(srv.URL, WorkspaceDirectory, BasicAuth{}), title)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if id != "ses_existing" {
-			t.Errorf("id = %q, want ses_existing", id)
-		}
-		if got := fake.titles(); len(got) != 1 {
-			t.Errorf("titles = %v, want no new session", got)
-		}
-	})
+func resolveReusesExisting(t *testing.T) {
+	fake := newFakeOpencode().addSession("ses_existing", testTitle)
 
-	t.Run("partial matches are ignored", func(t *testing.T) {
-		t.Parallel()
-		fake := newFakeOpencode().
-			addSession("ses_a", title+" extra").
-			addSession("ses_b", strings.TrimSuffix(title, "2"))
-		srv := fake.start(t)
+	id, err := resolveOnFake(t, fake)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "ses_existing" {
+		t.Errorf("id = %q, want ses_existing", id)
+	}
+	if got := fake.titles(); len(got) != 1 {
+		t.Errorf("titles = %v, want no new session", got)
+	}
+}
 
-		id, err := ResolveSession(context.Background(), NewOpenCodeClient(srv.URL, WorkspaceDirectory, BasicAuth{}), title)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if id != "ses_new1" {
-			t.Errorf("id = %q, want a newly created session", id)
-		}
-	})
+func resolveIgnoresPartials(t *testing.T) {
+	fake := newFakeOpencode().
+		addSession("ses_a", testTitle+" extra").
+		addSession("ses_b", strings.TrimSuffix(testTitle, "2"))
 
-	t.Run("duplicate sessions are ambiguous", func(t *testing.T) {
-		t.Parallel()
-		fake := newFakeOpencode().
-			addSession("ses_a", title).
-			addSession("ses_b", title)
-		srv := fake.start(t)
+	id, err := resolveOnFake(t, fake)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "ses_new1" {
+		t.Errorf("id = %q, want a newly created session", id)
+	}
+}
 
-		_, err := ResolveSession(context.Background(), NewOpenCodeClient(srv.URL, WorkspaceDirectory, BasicAuth{}), title)
-		if !errors.Is(err, ErrDuplicateSession) {
-			t.Fatalf("error = %v, want ErrDuplicateSession", err)
-		}
-		if got := fake.titles(); len(got) != 2 {
-			t.Errorf("titles = %v, want no session created", got)
-		}
-	})
+func resolveRejectsDuplicates(t *testing.T) {
+	fake := newFakeOpencode().
+		addSession("ses_a", testTitle).
+		addSession("ses_b", testTitle)
 
-	t.Run("exact match on a later page is reused", func(t *testing.T) {
-		t.Parallel()
-		fake := newFakeOpencode().
-			addSession("ses_partial", title+" (partial match)").
-			addSession("ses_exact", title).
-			pageSize(1)
-		srv := fake.start(t)
+	if _, err := resolveOnFake(t, fake); !errors.Is(err, ErrDuplicateSession) {
+		t.Fatalf("error = %v, want ErrDuplicateSession", err)
+	}
+	if got := fake.titles(); len(got) != 2 {
+		t.Errorf("titles = %v, want no session created", got)
+	}
+}
 
-		id, err := ResolveSession(context.Background(), NewOpenCodeClient(srv.URL, WorkspaceDirectory, BasicAuth{}), title)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if id != "ses_exact" {
-			t.Errorf("id = %q, want ses_exact", id)
-		}
-		if got := fake.titles(); len(got) != 2 {
-			t.Errorf("titles = %v, want no session created", got)
-		}
-	})
+func resolveReusesPagedExact(t *testing.T) {
+	fake := newFakeOpencode().
+		addSession("ses_partial", testTitle+" (partial match)").
+		addSession("ses_exact", testTitle).
+		pageSize(1)
 
-	t.Run("duplicate sessions across pages are ambiguous", func(t *testing.T) {
-		t.Parallel()
-		fake := newFakeOpencode().
-			addSession("ses_a", title).
-			addSession("ses_b", title).
-			pageSize(1)
-		srv := fake.start(t)
+	id, err := resolveOnFake(t, fake)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "ses_exact" {
+		t.Errorf("id = %q, want ses_exact", id)
+	}
+	if got := fake.titles(); len(got) != 2 {
+		t.Errorf("titles = %v, want no session created", got)
+	}
+}
 
-		_, err := ResolveSession(context.Background(), NewOpenCodeClient(srv.URL, WorkspaceDirectory, BasicAuth{}), title)
-		if !errors.Is(err, ErrDuplicateSession) {
-			t.Fatalf("error = %v, want ErrDuplicateSession", err)
-		}
-		if got := fake.titles(); len(got) != 2 {
-			t.Errorf("titles = %v, want no session created", got)
-		}
-	})
+func resolveRejectsPagedDuplicates(t *testing.T) {
+	fake := newFakeOpencode().
+		addSession("ses_a", testTitle).
+		addSession("ses_b", testTitle).
+		pageSize(1)
 
-	t.Run("search failure does not create a session", func(t *testing.T) {
-		t.Parallel()
-		fake := newFakeOpencode().fail("GET", "/api/session", 500, "boom")
-		srv := fake.start(t)
+	if _, err := resolveOnFake(t, fake); !errors.Is(err, ErrDuplicateSession) {
+		t.Fatalf("error = %v, want ErrDuplicateSession", err)
+	}
+	if got := fake.titles(); len(got) != 2 {
+		t.Errorf("titles = %v, want no session created", got)
+	}
+}
 
-		_, err := ResolveSession(context.Background(), NewOpenCodeClient(srv.URL, WorkspaceDirectory, BasicAuth{}), title)
-		if err == nil {
-			t.Fatal("error is nil, want a search error")
-		}
-		if got := fake.titles(); len(got) != 0 {
-			t.Errorf("titles = %v, want no session created", got)
-		}
-	})
+func resolveFailsWhenSearchFails(t *testing.T) {
+	fake := newFakeOpencode().fail("GET", "/api/session", 500, "boom")
+
+	if _, err := resolveOnFake(t, fake); err == nil {
+		t.Fatal("error is nil, want a search error")
+	}
+	if got := fake.titles(); len(got) != 0 {
+		t.Errorf("titles = %v, want no session created", got)
+	}
 }
