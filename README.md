@@ -128,6 +128,32 @@ GET /api/session/{sessionID}/message?type=assistant&order=desc&limit=1
 
 だけを出力します。reasoning や tool 実行の内容は出力しません。`text` が複数ある場合は、出現順に改行で連結します。
 
+`finish` が `error` の message は、run が OpenCode 側で失敗した message です。`content` は空になるため、text がないことではなく OpenCode が記録した失敗を、そのままエラーとして伝播します。
+
+```json
+{
+  "content": [],
+  "finish": "error",
+  "error": {
+    "type": "provider.auth",
+    "message": "Error from provider (Console): OpenCode's free tier can only be used from within OpenCode",
+    "status": 403
+  }
+}
+```
+
+```text
+opencode-session: OpenCode run failed: Error from provider (Console): OpenCode's free tier can only be used from within OpenCode
+```
+
+`error` や `error.message` が欠落した応答でも panic はせず。原因が分からない場合は汎用の
+
+```text
+opencode-session: OpenCode run failed
+```
+
+として終了します。`finish` が `error` でないのに text がない場合は、これまでどおり `no text content` として終了します。
+
 ### Question (Form) への回答
 
 OpenCode V2 では、旧 `question` 相当の対話は Form として表現されます。このコマンドは Slack 側との双方向 protocol をまだ持たないため、Form への回答は実装していません。

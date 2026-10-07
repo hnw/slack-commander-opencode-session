@@ -94,16 +94,98 @@ func TestRunnerDoesNotReturnPreviousAnswer(t *testing.T) {
 	}
 }
 
-func TestRunnerRejectsAnswerWithoutText(t *testing.T) {
+func TestRunnerClassifiesAssistantMessage(t *testing.T) {
 	t.Parallel()
-	fake := newFakeOpencode().
-		addSession("ses_1", testTitle).
-		answerAfterPrompt(AssistantContent{Type: "reasoning", Text: "only thinking"})
-	runner := testRunner(t, fake)
+	// A new assistant message has four possible outcomes: an answer, a run OpenCode
+	// ended with an error, an error finish that carries no explanation, and a run
+	// that simply finished without any text.
+	tests := []struct {
+		name     string
+		arrange  func(*fakeOpencode)
+		want     string
+		wantErr  string
+		exactErr bool
+		wantFail bool
+	}{
+		{
+			name: "answered",
+			arrange: func(f *fakeOpencode) {
+				f.answerAfterPrompt(AssistantContent{Type: "text", Text: "the answer"})
+			},
+			want: "the answer",
+		},
+		{
+			name: "provider rejection",
+			arrange: func(f *fakeOpencode) {
+				f.failAfterPrompt(FinishError, providerRejection())
+			},
+			want:     "",
+			wantErr:  "OpenCode run failed: Error from provider (Console): OpenCode's free tier can only be used from within OpenCode",
+			exactErr: true,
+			wantFail: true,
+		},
+		{
+			name: "error finish without a detail",
+			arrange: func(f *fakeOpencode) {
+				f.failAfterPrompt(FinishError, nil)
+			},
+			wantErr:  "OpenCode run failed",
+			exactErr: true,
+			wantFail: true,
+		},
+		{
+			name: "error finish with a blank message",
+			arrange: func(f *fakeOpencode) {
+				f.failAfterPrompt(FinishError, &AssistantError{Type: "provider.auth", Status: 403})
+			},
+			wantErr:  "OpenCode run failed",
+			exactErr: true,
+			wantFail: true,
+		},
+		{
+			name: "finished without text",
+			arrange: func(f *fakeOpencode) {
+				f.answerAfterPrompt(AssistantContent{Type: "reasoning", Text: "only thinking"})
+			},
+			wantErr: "no text content",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := newFakeOpencode().addSession("ses_1", testTitle)
+			tt.arrange(fake)
+			// The session ran and then stopped, as any finished run does.
+			fake.runPlan([]bool{true}, false)
+			runner := testRunner(t, fake)
 
-	if _, err := runner.Run(context.Background(), testTitle, "hi"); err == nil ||
-		!strings.Contains(err.Error(), "no text content") {
-		t.Errorf("error = %v, want a no text content error", err)
+			got, err := runner.Run(context.Background(), testTitle, "hi")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if got != tt.want {
+					t.Errorf("answer = %q, want %q", got, tt.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("answer = %q, want an error", got)
+			}
+			if tt.exactErr {
+				if err.Error() != tt.wantErr {
+					t.Errorf("error = %q, want %q", err, tt.wantErr)
+				}
+			} else if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want it to mention %q", err, tt.wantErr)
+			}
+			if got != "" {
+				t.Errorf("answer = %q, want empty", got)
+			}
+			if errors.Is(err, ErrRunFailed) != tt.wantFail {
+				t.Errorf("errors.Is(err, ErrRunFailed) = %v, want %v", !tt.wantFail, tt.wantFail)
+			}
+		})
 	}
 }
 

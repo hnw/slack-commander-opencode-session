@@ -100,11 +100,51 @@ type AssistantContent struct {
 	Text string `json:"text"`
 }
 
+// FinishError is the finish reason of a message whose run OpenCode ended with an
+// error instead of an answer.
+const FinishError = "error"
+
+// FinishStop is the finish reason of a message whose run ended normally.
+const FinishStop = "stop"
+
+// ErrRunFailed reports a run OpenCode itself ended with an error. The failure it
+// explained, if any, is wrapped around it, so it has to be unwrapped rather than
+// compared.
+var ErrRunFailed = errors.New("OpenCode run failed")
+
+// AssistantError is the failure OpenCode recorded on a message that ended in an
+// error finish, as a rejected provider request does. A malformed response may
+// omit it, so every field can be empty.
+type AssistantError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Status  int    `json:"status"`
+}
+
 // AssistantMessage is an assistant message projected from a session.
 type AssistantMessage struct {
 	ID      string             `json:"id"`
 	Type    string             `json:"type"`
 	Content []AssistantContent `json:"content"`
+	Finish  string             `json:"finish"`
+	Error   *AssistantError    `json:"error"`
+}
+
+// Failed reports whether OpenCode ended the run of this message with an error.
+// Such a message carries no answer to read, so its text must not be projected.
+func (m AssistantMessage) Failed() bool { return m.Finish == FinishError }
+
+// Failure returns the error the failed message explains, wrapped around
+// ErrRunFailed. It is nil for a message that did not fail. A failed message
+// without a usable message is still a run failure, only an unexplained one.
+func (m AssistantMessage) Failure() error {
+	if !m.Failed() {
+		return nil
+	}
+	if m.Error == nil || strings.TrimSpace(m.Error.Message) == "" {
+		return ErrRunFailed
+	}
+	return fmt.Errorf("%w: %s", ErrRunFailed, m.Error.Message)
 }
 
 // TextParts returns the text contents of the message in order.

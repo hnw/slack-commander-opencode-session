@@ -153,6 +153,22 @@ func TestRunKeepsStdoutEmptyOnFailure(t *testing.T) {
 			wantErr: "unsupported interaction",
 		},
 		{
+			name: "provider rejection",
+			arrange: func(f *fakeOpencode) {
+				f.addSession("ses_1", "slack:C1:1.2").
+					failAfterPrompt(FinishError, providerRejection())
+			},
+			wantErr: "free tier can only be used from within OpenCode",
+		},
+		{
+			name: "run failure without a detail",
+			arrange: func(f *fakeOpencode) {
+				f.addSession("ses_1", "slack:C1:1.2").
+					failAfterPrompt(FinishError, nil)
+			},
+			wantErr: "OpenCode run failed",
+		},
+		{
 			name: "answer without text",
 			arrange: func(f *fakeOpencode) {
 				f.addSession("ses_1", "slack:C1:1.2").

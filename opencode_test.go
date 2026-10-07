@@ -259,6 +259,103 @@ func TestAssistantMessageTextParts(t *testing.T) {
 	}
 }
 
+func TestLatestAssistantMessageReadsRunFailure(t *testing.T) {
+	t.Parallel()
+	// The payload a provider rejection produces, as observed on a real run.
+	body := `{"data":[{"id":"msg_err","type":"assistant","content":[],"finish":"error","error":` +
+		`{"type":"provider.auth","message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode","status":403}}]}`
+	fake := newFakeOpencode().
+		addSession("ses_1", "slack:C1:1.2").
+		fail(http.MethodGet, "/api/session/ses_1/message", http.StatusOK, body)
+	srv := fake.start(t)
+
+	answer, found, err := NewOpenCodeClient(srv.URL, WorkspaceDirectory, BasicAuth{}).
+		LatestAssistantMessage(context.Background(), "ses_1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !found || !answer.Failed() {
+		t.Fatalf("answer = %+v, found = %v, want a failed message", answer, found)
+	}
+	if answer.Error == nil || answer.Error.Type != "provider.auth" || answer.Error.Status != 403 {
+		t.Fatalf("error = %+v, want the recorded provider failure", answer.Error)
+	}
+	want := "OpenCode run failed: Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"
+	if got := answer.Failure(); got == nil || got.Error() != want {
+		t.Errorf("Failure() = %v, want %q", got, want)
+	}
+	if !errors.Is(answer.Failure(), ErrRunFailed) {
+		t.Error("Failure() does not wrap ErrRunFailed")
+	}
+}
+
+func TestAssistantMessageFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		message AssistantMessage
+		want    string
+	}{
+		{
+			name:    "no finish",
+			message: AssistantMessage{},
+		},
+		{
+			name:    "completed",
+			message: AssistantMessage{Finish: FinishStop, Content: []AssistantContent{{Type: "text", Text: "hi"}}},
+		},
+		{
+			name:    "error finish without a detail",
+			message: AssistantMessage{Finish: FinishError},
+			want:    "OpenCode run failed",
+		},
+		{
+			name:    "error finish with a blank message",
+			message: AssistantMessage{Finish: FinishError, Error: &AssistantError{Type: "provider.auth", Status: 403}},
+			want:    "OpenCode run failed",
+		},
+		{
+			name:    "provider rejection",
+			message: AssistantMessage{Finish: FinishError, Error: providerRejection()},
+			want: "OpenCode run failed: Error from provider (Console): " +
+				"OpenCode's free tier can only be used from within OpenCode",
+		},
+		{
+			// A failed run is reported as a failure even when OpenCode left some
+			// content behind: that content is not an answer to the prompt.
+			name: "error finish with leftover text",
+			message: AssistantMessage{
+				Finish:  FinishError,
+				Content: []AssistantContent{{Type: "text", Text: "partial"}},
+				Error:   providerRejection(),
+			},
+			want: "OpenCode run failed: Error from provider (Console): " +
+				"OpenCode's free tier can only be used from within OpenCode",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.message.Failure()
+			if tt.want == "" {
+				if got != nil {
+					t.Fatalf("Failure() = %v, want no failure", got)
+				}
+				if tt.message.Failed() {
+					t.Error("Failed() = true, want false")
+				}
+				return
+			}
+			if got == nil || got.Error() != tt.want {
+				t.Fatalf("Failure() = %v, want %q", got, tt.want)
+			}
+			if !errors.Is(got, ErrRunFailed) {
+				t.Error("Failure() does not wrap ErrRunFailed")
+			}
+		})
+	}
+}
+
 func TestClientReportsHTTPStatusAndBody(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
